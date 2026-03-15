@@ -1,0 +1,15 @@
+.git
+.env
+.venv
+venv
+__pycache__
+*.pyc
+.cursor
+*.db
+*.db-journal
+.gitignore
+.dockerignore
+*.md
+data.py
+query.json
+disease_anamnesis_database.json

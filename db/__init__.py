@@ -1,0 +1,43 @@
+"""Слой БД: подключение, инициализация схемы, CRUD."""
+from db.connection import get_connection, init_db
+from db.crud import (
+    create_or_get_user,
+    get_all_doctors,
+    get_doctors_by_ids,
+    get_doctors_for_secondary,
+    get_therapist,
+    get_available_slots,
+    book_slot,
+    create_appointment,
+    get_user_appointments_count,
+    get_draft,
+    save_draft,
+    delete_draft,
+    get_appointments_for_reminder,
+    mark_reminder_sent,
+    cancel_appointment,
+    free_slot,
+    slot_start_moscow,
+)
+
+__all__ = [
+    "get_connection",
+    "init_db",
+    "create_or_get_user",
+    "get_all_doctors",
+    "get_doctors_by_ids",
+    "get_doctors_for_secondary",
+    "get_therapist",
+    "get_available_slots",
+    "book_slot",
+    "create_appointment",
+    "get_user_appointments_count",
+    "get_draft",
+    "save_draft",
+    "delete_draft",
+    "get_appointments_for_reminder",
+    "mark_reminder_sent",
+    "cancel_appointment",
+    "free_slot",
+    "slot_start_moscow",
+]
