@@ -1,106 +1,137 @@
 import os
+import uuid
+from typing import List, Optional, Dict
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import List
-from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
+
+# LangChain imports
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.prompts import ChatPromptTemplate
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
-# Application Initialization
 app = FastAPI(
-    title="Medical RAG Agent API",
-    description="An LLM baseline for disease anamnesis via RAG pipeline.",
-    version="1.0.0"
+    title="Medical Conversational RAG API",
+    description="Differential diagnosis agent with probability thresholds.",
+    version="2.0.0"
 )
 
-FAISS_INDEX_DIR = "./faiss_db"
-OPEN_ROUTER_API_KEY = os.getenv("OPEN_ROUTER", "")
-
+FAISS_INDEX_DIR = "data/faiss_db"
+load_dotenv()
+GOOGLE_API_KEY = os.getenv("AI_STUDIO", "")
 # Load models at startup
-print("Loading Embedding Model...")
+print("Loading Local Embedding Model...")
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 
-print("Loading Vector Store...")
+print("Loading FAISS Vector Store...")
 try:
     vectorstore = FAISS.load_local(FAISS_INDEX_DIR, embeddings, allow_dangerous_deserialization=True)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 except Exception as e:
-    print(f"Warning: Could not load FAISS vectorstore (have you run ingest.py?): {e}")
+    print(f"Warning: Could not load FAISS: {e}")
     retriever = None
 
-# Initialize LLM via OpenRouter interface
-llm = ChatOpenAI(
-    openai_api_base="https://openrouter.ai/api/v1",
-    openai_api_key=OPEN_ROUTER_API_KEY,
-    model_name="mistralai/mistral-small-24b-instruct-2501:free",
-    temperature=0.0
+# Gemini 2.5 Flash via Google AI Studio
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    google_api_key=GOOGLE_API_KEY,
+    temperature=0.1
 )
 
-# Define IO Pydantic Models
-class PatientRequest(BaseModel):
-    complaint: str = Field(..., example="У меня сильно болит живот вот уже два дня и меня тошнит")
+# In-memory storage for hackathon state (use Redis in prod)
+sessions: Dict[str, Dict] = {}
 
-class AgentResponse(BaseModel):
-    symptoms: List[str] = Field(description="List of extracted explicit symptoms")
-    urgency: str = Field(description="Urgency classification (e.g., Высокая, Средняя, Низкая)")
-    suggested_doctor: str = Field(description="Suggested doctor specialist type")
-    clarifying_questions: List[str] = Field(description="1-2 clarifying questions to narrow down the context based on potential diseases")
-    express_appointment_offered: bool = Field(description="Whether an express appointment is offered")
-    express_appointment_message: str = Field(description="Text formulation of the express appointment offer")
+class ChatRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: str = Field(..., example="У меня болит живот")
 
-# Setup LangChain output parsing and prompt
-parser = JsonOutputParser(pydantic_object=AgentResponse)
+class DiagnosticTurn(BaseModel):
+    extracted_symptoms: List[str] = Field(description="Список всех извлеченных симптомов пациента.")
+    urgency: str = Field("Низкая", description="Степень срочности состояния: Высокая / Средняя / Низкая")
+    suggested_doctor: str = Field("Терапевт", description="Рекомендуемый профильный врач")
+    express_appointment: bool = Field(False, description="Предлагать ли экспресс-приём? (true если Высокая/Средняя срочность)")
+    question: Optional[str] = Field(None, description="Следующий уточняющий вопрос пациенту, чтобы собрать больше информации для врача")
+    decision_reached: bool = Field(False, description="Завершен ли сбор информации? (true если собрано достаточно симптомов и картина ясна, обычно после 3-5 вопросов)")
+    preliminary_diagnosis: Optional[str] = Field(None, description="Предварительная гипотеза о заболевании (скрыто от пациента, только для врача)")
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", """Ты - медицинский ассистент с искусственным интеллектом, работающий на этапе претриажа.
-Твоя задача: на основе первоначальных жалоб пациента и информации из медицинской базы данных (контекста) проанализировать ситуацию.
+class ChatResponse(BaseModel):
+    session_id: str
+    reply: str
+    turn_data: DiagnosticTurn
 
-Обязательно выполни следующие шаги:
-1. Извлеки все упомянутые симптомы.
-2. Классифицируй срочность состояния (Высокая / Средняя / Низкая).
-3. Порекомендуй медицинского специалиста (например: Терапевт, Гастроэнтеролог, Невролог).
-4. Задай 1 или 2 уточняющих вопроса, которые помогут собрать дополнительные важные симптомы, характерные для предполагаемых болезней из контекста (чтобы лучше их отдифференцировать).
-5. Предложи пациенту записаться на экспресс-прием.
+parser = JsonOutputParser(pydantic_object=DiagnosticTurn)
 
-Вот контекст потенциальных похожих заболеваний на основе вектора симптомов:
+SYSTEM_PROMPT = """Ты - умный медицинский ассистент (LLM-агент). Твоя главная цель — собрать максимально полную и точную информацию о жалобах пациента для передачи врачу.
+У тебя есть история диалога и справочный контекст из базы данных (RAG).
+
+ТВОЙ АЛГОРИТМ РАБОТЫ:
+1. ИЗВЛЕЧЕНИЕ СИМПТОМОВ: Внимательно проанализируй сообщения пациента и выдели все симптомы (extracted_symptoms).
+2. КЛАССИФИКАЦИЯ ЖАЛОБ И СРОЧНОСТЬ: Оцени степень срочности (urgency: Высокая / Средняя / Низкая) на основе симптомов.
+3. РЕКОМЕНДАЦИЯ ВРАЧА: Выбери наиболее подходящего профильного специалиста (suggested_doctor).
+4. ЭКСПРЕСС-ПРИЁМ: Если состояние требует быстрого вмешательства (Высокая или Средняя срочность), установи express_appointment = true.
+5. УТОЧНЯЮЩИЕ ВОПРОСЫ: Если картина неполная, задай ОДИН релевантный уточняющий вопрос (question), чтобы детализировать симптомы (например, характер боли, продолжительность, сопутствующие факторы). Используй справочный контекст для формирования релевантных вопросов.
+6. ЗАВЕРШЕНИЕ СБОРА: Если собрано достаточно информации (обычно после 3-5 вопросов) и картина ясна, установи decision_reached = true. В этом случае вопрос (question) можно оставить пустым.
+
+СПРАВОЧНЫЙ КОНТЕКСТ (RAG) ПОХОЖИХ ЗАБОЛЕВАНИЙ И ИХ СИМПТОМОВ:
 {context}
 
-ОБЯЗАТЕЛЬНО ответь строго в формате JSON, соответствующем следующей схеме:
+ОТВЕТЬ СТРОГО В JSON ФОРМАТЕ:
 {format_instructions}
-"""),
-    ("human", "Жалобы пациента: {complaint}")
+"""
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT),
+    ("human", "История диалога:\n{history}\n\nНовое сообщение: {message}")
 ])
 
 chain = prompt | llm | parser
 
-@app.on_event("startup")
-def startup_event():
-    if not OPEN_ROUTER_API_KEY:
-        print("WARNING: OPEN_ROUTER environment variable is not set! LLM requests will fail.")
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok", "vectorstore_loaded": retriever is not None}
-
-@app.post("/analyze_anamnesis", response_model=AgentResponse)
-def analyze_anamnesis(req: PatientRequest):
-    if not OPEN_ROUTER_API_KEY:
-        raise HTTPException(status_code=500, detail="OPEN_ROUTER api key not configured")
-        
-    context_text = "Контекст не найден"
+@app.post("/chat_anamnesis", response_model=ChatResponse)
+def chat_anamnesis(req: ChatRequest):
+    if not GOOGLE_API_KEY:
+        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY (AI_STUDIO) key missing")
+    
+    sid = req.session_id or str(uuid.uuid4())
+    if sid not in sessions:
+        sessions[sid] = {"history": []}
+    
+    # Update local history
+    sessions[sid]["history"].append(f"Пациент: {req.message}")
+    history_str = "\n".join(sessions[sid]["history"])
+    
+    # RAG: Retrieve context based on the *entire* history for better match
+    context_text = "Нет данных"
     if retriever:
-        docs = retriever.invoke(req.complaint)
-        context_text = "\n---\n".join([d.page_content for d in docs])
+        docs = retriever.invoke(history_str)
+        context_text = "\n\n".join([d.page_content for d in docs])
         
     try:
-        response = chain.invoke({
+        res_data = chain.invoke({
             "context": context_text,
             "format_instructions": parser.get_format_instructions(),
-            "complaint": req.complaint
+            "history": history_str,
+            "message": req.message
         })
-        return response
+        
+        turn = DiagnosticTurn(**res_data)
+        
+        if turn.decision_reached:
+            sessions[sid]["history"].append("ИИ: Сбор информации завершен.")
+            reply = f"Спасибо за ответы! Я собрал всю необходимую информацию для врача. Рекомендуемый специалист: {turn.suggested_doctor}."
+            if turn.express_appointment:
+                reply += " Учитывая ваши симптомы, мы рекомендуем оформить экспресс-приём."
+        else:
+            sessions[sid]["history"].append(f"ИИ: {turn.question}")
+            reply = turn.question or "Пожалуйста, расскажите подробнее."
+
+        return ChatResponse(session_id=sid, reply=reply, turn_data=turn)
+        
     except Exception as e:
-        # Catch JSON parse errors or API failures
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"LLM Error: {str(e)}")
+
+@app.get("/health")
+def health():
+    return {"status": "running", "faiss_loaded": retriever is not None}
+
