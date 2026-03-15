@@ -30,3 +30,17 @@ try:
     print(res.content)
 except Exception as e:
     print("Error:", e)
+
+llm3 = ChatGoogleGenerativeAI(
+    model="gemma-3-27b-it",
+    google_api_key=GOOGLE_API_KEY,
+    temperature=0.1
+)
+
+try:
+    print("Testing gemma-3-27b-it...")
+    res = llm3.invoke("Hello")
+    print(res.content)
+except Exception as e:
+    print("Error:", e)
+

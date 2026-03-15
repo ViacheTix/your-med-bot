@@ -100,6 +100,19 @@ def get_therapist() -> dict | None:
         conn.close()
 
 
+def get_doctors_by_specialty(specialty: str) -> list[dict]:
+    """Список врачей по специальности (точное совпадение)."""
+    conn = get_connection()
+    try:
+        cur = conn.execute(
+            "SELECT id, full_name, specialty, description FROM doctors WHERE specialty = ? ORDER BY full_name",
+            (specialty,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 # --- slots (в БД хранятся в UTC) ---
 
 def get_available_slots(
