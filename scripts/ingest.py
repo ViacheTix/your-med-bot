@@ -14,7 +14,7 @@ def main():
         return
 
     print("Initializing local embedding model (sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2)...")
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    embeddings = HuggingFaceEmbeddings(model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 
     print("Loading cleaned disease database...")
     db_path = "data/disease_anamnesis_database_cleaned.json"
