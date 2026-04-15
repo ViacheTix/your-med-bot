@@ -4,7 +4,6 @@ import re
 from collections import defaultdict
 import pymorphy2
 
-# Initialize morph analyzer for Russian
 morph = pymorphy2.MorphAnalyzer()
 
 STOP_WORDS = {
@@ -27,16 +26,13 @@ class DoctorRecommender:
         
         try:
             with open(self.csv_path, 'r', encoding='utf-8-sig') as file:
-                # Use DictReader with explicit fieldnames based on my exploration
                 fieldnames = ['disease', 'symptoms', 'treatment', 'doctor', 'urgency']
                 reader = csv.DictReader(file, fieldnames=fieldnames)
-                
-                # Skip header if it exists (the file I saw had it)
+
                 first_row = next(reader)
                 if first_row['disease'] == 'заболевание':
-                    pass # Header skipped
+                    pass
                 else:
-                    # If it wasn't a header, add it back
                     knowledge_base.append({
                         'disease': first_row['disease'],
                         'symptoms': first_row['symptoms'],
@@ -86,7 +82,6 @@ class DoctorRecommender:
         """
         user_symptoms_list: List of symptoms (can be strings like 'насморк' or 'cough')
         """
-        # Convert list to a single string for normalization logic compatibility
         user_input_str = ", ".join(user_symptoms_list)
         user_symptoms_set = self.symptoms_to_normalized_words(user_input_str)
         
@@ -101,14 +96,12 @@ class DoctorRecommender:
                 relevance_score = len(common_symptoms) / len(user_symptoms_set) if user_symptoms_set else 0
                 final_score = coverage_score * 0.4 + relevance_score * 0.6
                 
-                # Boost if disease name itself is in the input (unlikely but possible)
                 disease_words = self.symptoms_to_normalized_words(record['disease'])
                 if user_symptoms_set.intersection(disease_words):
                     final_score += 0.2
             else:
                 final_score = 0
             
-            # Record has 'doctor' which might be a comma-separated list of roles
             doctors = [d.strip() for d in record['doctor'].split(',')]
             for doctor in doctors:
                 if final_score > doctor_ratings[doctor]:
@@ -117,6 +110,5 @@ class DoctorRecommender:
         sorted_doctors = sorted(doctor_ratings.items(), key=lambda x: x[1], reverse=True)
         return sorted_doctors[:top_n]
 
-# Initialize with default path
 DEFAULT_CSV = os.path.join(os.path.dirname(__file__), 'dataset_linnk_ai_zYvE_translated_ru-RU.csv')
 recommender = DoctorRecommender(DEFAULT_CSV)

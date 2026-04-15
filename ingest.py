@@ -4,12 +4,10 @@ from langchain.schema import Document
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
-# Set up persistence directory
 FAISS_INDEX_DIR = "data/faiss_db"
 
 def main():
     print("Initializing embedding model (free local multilingual model)...")
-    # Using a fast, lightweight multilingual model perfect for Russian medical texts
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
 
     print("Loading cleaned disease database...")
@@ -27,7 +25,6 @@ def main():
         disease_name = item.get("Disease_Name", "Unknown")
         summary = item.get("Summary", "")
         
-        # Aggregate all text from symptomatology sections
         sections_text = ""
         for key, value in item.items():
             if key not in ["Disease_Name", "Wikipedia_Title", "Wikidata_URL", "Summary"]:
@@ -42,7 +39,6 @@ def main():
         docs.append(doc)
         
     print(f"Creating FAISS vector store for {len(docs)} documents...")
-    # Create index and save to local disk
     vectorstore = FAISS.from_documents(
         documents=docs,
         embedding=embeddings

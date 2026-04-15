@@ -3,7 +3,6 @@ import uuid
 from typing import List, Optional, Dict
 from dotenv import load_dotenv
 
-# LangChain imports
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -46,10 +45,8 @@ class MedicalAgent:
         )
         self.parser = JsonOutputParser(pydantic_object=DiagnosticTurn)
         
-        # Load allowed symptoms
         self.symptoms_file = SYMPTOMS_FILE
         if not os.path.exists(self.symptoms_file):
-             # Try relative to project root if not found (for different CWDs)
              base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
              self.symptoms_file = os.path.join(base_dir, SYMPTOMS_FILE)
 
@@ -104,5 +101,4 @@ class MedicalAgent:
         """Extracts history from state data if available."""
         return state_data.get("history", [])
 
-# Singleton instance
 agent = MedicalAgent()
