@@ -256,7 +256,6 @@ async def _get_llm_turn(msg: Message, state: FSMContext):
 
 async def _handle_llm_decision(msg: Message, state: FSMContext, turn, state_group):
     """Логика после завершения сбора информации LLM."""
-    # Используем новую логику рекомендаций из doc.ipynb (recommendation.py)
     top_recommended = recommender.find_top_doctors(turn.extracted_symptoms)
     
     specialties = []
@@ -265,7 +264,6 @@ async def _handle_llm_decision(msg: Message, state: FSMContext, turn, state_grou
         if spec not in specialties:
             specialties.append(spec)
             
-    # Если рекомендация пуста, пробуем использовать suggested_doctor от LLM напрямую
     if not specialties and turn.suggested_doctor:
         specialties.append(turn.suggested_doctor)
 
@@ -273,7 +271,6 @@ async def _handle_llm_decision(msg: Message, state: FSMContext, turn, state_grou
     for spec in specialties:
         doctors.extend(get_doctors_by_specialty(spec))
     
-    # Берем топ-3 уникальных врачей
     seen_ids = set()
     final_doctors = []
     for d in doctors:
@@ -348,7 +345,6 @@ async def primary_symptom_for_anamnesis(msg: Message, state: FSMContext):
 
 @router.message(PrimaryKnowsDoctor.llm_anamnesis, F.text)
 async def pn_llm_anamnesis_step_knows(msg: Message, state: FSMContext):
-    # Используем тот же хендлер, что и для NoDoctor, но с другим стейтом
     turn = await _get_llm_turn(msg, state)
     if not turn:
         return
@@ -478,9 +474,7 @@ async def primary_no_doctor_chosen(cq: CallbackQuery, state: FSMContext):
     await state.update_data(doctor_id=doctor_id)
 
     data = await state.get_data()
-    # Если мы уже прошли через LLM (есть история), то анамнез уже собран
     if data.get("history"):
-        # Переходим к выбору слотов, с собранным анамнезом (10 мин)
         await _show_slots_primary_no(cq.message, state, DURATION_MIN_WITH_ANAMNESIS, with_description=True)
         return
 
@@ -505,8 +499,6 @@ async def pn_draft_continue(cq: CallbackQuery, state: FSMContext):
     if not draft:
         await cq.message.edit_text(TEXT_ANAMNESIS_OFFER, reply_markup=yes_no_kb("pn_anamnesis_yes", "pn_anamnesis_no"))
         return
-    # При продолжении старого анамнеза просто показываем то, что было, или сбрасываем.
-    # Для простоты: сбрасываем и предлагаем заново через LLM.
     await cq.message.edit_text("Старый черновик несовместим с новой системой. Начнем заново?")
     await state.set_state(PrimaryNoDoctor.symptom_description_after_doctor)
     await cq.message.answer(TEXT_SYMPTOMS_ANAMNESIS)

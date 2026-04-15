@@ -7,5 +7,3 @@ langchain-community
 faiss-cpu
 sentence-transformers
 pydantic>=2.0.0
-fastapi
-uvicorn

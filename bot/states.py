@@ -18,7 +18,7 @@ class PrimaryKnowsDoctor(StatesGroup):
     choosing_anamnesis = State()
     symptom_description = State()
     anamnesis_questions = State()
-    llm_anamnesis = State()  # New state for LLM interaction
+    llm_anamnesis = State()
     anamnesis_confirm = State()
     anamnesis_fix_number = State()
     choosing_slot = State()
@@ -28,7 +28,7 @@ class PrimaryKnowsDoctor(StatesGroup):
 class PrimaryNoDoctor(StatesGroup):
     """Первичный, не знает врача: описание симптомов -> подбор врачей."""
     symptom_description = State()
-    llm_anamnesis = State()  # New state for LLM interaction
+    llm_anamnesis = State()
     choosing_doctor = State()
     choosing_anamnesis = State()
     symptom_description_after_doctor = State()
