@@ -22,7 +22,28 @@ from bot.states import (
     PrimaryNoDoctor,
     Secondary,
 )
-from bot.stubs import pick_doctors_by_symptoms, get_anamnesis_questions
+from llm.agent import agent
+from doctor.recommendation import recommender
+
+# Mapping from CSV doctor categories to our DB specializations
+SPECIALTY_MAPPING = {
+    "семейный врач": "Терапевт",
+    "неотложная помощь": "Терапевт",
+    "пульмонолог": "Пульмонолог",
+    "онколог": "Терапевт", # Fallback or add Oncologist if needed
+    "кардиолог": "Кардиолог",
+    "хирург": "Травматолог", # Closest match or fallback
+    "гастроэнтеролог": "Гастроэнтеролог",
+    "ревматолог": "Ревматолог",
+    "невролог": "Невролог",
+    "дерматолог": "Дерматолог",
+    "офтальмолог": "Офтальмолог",
+    "уролог": "Уролог",
+    "гинеколог": "Гинеколог",
+    "эндокринолог": "Эндокринолог",
+    "психотерапевт": "Психотерапевт",
+    "врач-инфекционист": "Терапевт",
+}
 from db import (
     create_or_get_user,
     get_all_doctors,
@@ -35,6 +56,7 @@ from db import (
     save_draft,
     delete_draft,
     get_doctors_by_ids,
+    get_doctors_by_specialty,
     slot_start_moscow,
     get_connection,
     cancel_appointment,
@@ -210,6 +232,74 @@ async def _go_to_anamnesis_confirm(message: Message, state: FSMContext, question
     await state.set_state(state_group.anamnesis_confirm)
 
 
+async def _get_llm_turn(msg: Message, state: FSMContext):
+    """Общая логика получения ответа от LLM."""
+    data = await state.get_data()
+    history = data.get("history", [])
+    user_msg = msg.text.strip()
+    history.append(f"Пациент: {user_msg}")
+
+    try:
+        turn = agent.chat(history, user_msg)
+        if not turn.decision_reached:
+            history.append(f"ИИ: {turn.question}")
+        else:
+            history.append("ИИ: Сбор информации завершен.")
+
+        await state.update_data(history=history, last_turn=turn.model_dump())
+        return turn
+    except Exception as e:
+        logger.exception("LLM Error: %s", e)
+        await msg.answer("Извините, произошла ошибка. Пожалуйста, попробуйте позже.")
+        return None
+
+
+async def _handle_llm_decision(msg: Message, state: FSMContext, turn, state_group):
+    """Логика после завершения сбора информации LLM."""
+    # Используем новую логику рекомендаций из doc.ipynb (recommendation.py)
+    top_recommended = recommender.find_top_doctors(turn.extracted_symptoms)
+    
+    specialties = []
+    for doc_role, score in top_recommended:
+        spec = SPECIALTY_MAPPING.get(doc_role.lower(), doc_role.title())
+        if spec not in specialties:
+            specialties.append(spec)
+            
+    # Если рекомендация пуста, пробуем использовать suggested_doctor от LLM напрямую
+    if not specialties and turn.suggested_doctor:
+        specialties.append(turn.suggested_doctor)
+
+    doctors = []
+    for spec in specialties:
+        doctors.extend(get_doctors_by_specialty(spec))
+    
+    # Берем топ-3 уникальных врачей
+    seen_ids = set()
+    final_doctors = []
+    for d in doctors:
+        if d["id"] not in seen_ids:
+            final_doctors.append(d)
+            seen_ids.add(d["id"])
+        if len(final_doctors) >= 3:
+            break
+
+    if not final_doctors:
+        await msg.answer("К сожалению, не удалось точно подобрать специалиста. Пожалуйста, обратитесь к терапевту.")
+        final_doctors = get_doctors_by_specialty("Терапевт")[:1]
+
+    data = await state.get_data()
+    await state.update_data(symptom_description=", ".join(turn.extracted_symptoms))
+    await state.set_state(state_group.choosing_doctor)
+    await msg.answer(
+        f"Спасибо за ответы! Я собрал информацию для врача.\n\n"
+        f"Ваши симптомы: {', '.join(turn.extracted_symptoms)}\n"
+        f"Рекомендуемые специалисты: {', '.join(specialties)}\n\n"
+        f"{TEXT_CHOOSE_DOCTOR}",
+        reply_markup=doctors_kb(final_doctors, "pn_doc"),
+    )
+
+
+
 @router.callback_query(PrimaryKnowsDoctor.choosing_anamnesis, F.data == "draft_continue")
 async def draft_continue(cq: CallbackQuery, state: FSMContext):
     await cq.answer()
@@ -218,10 +308,10 @@ async def draft_continue(cq: CallbackQuery, state: FSMContext):
     if not draft:
         await cq.message.edit_text(TEXT_ANAMNESIS_OFFER, reply_markup=yes_no_kb("anamnesis_yes", "anamnesis_no"))
         return
-    answers = json.loads(draft["answers_json"])
-    questions = get_anamnesis_questions(None)
-    await state.update_data(questions=questions, answers=answers, current_index=draft["current_question_index"])
-    await _go_to_anamnesis_confirm(cq.message, state, questions, answers, PrimaryKnowsDoctor)
+    await cq.message.edit_text("Старый черновик несовместим. Начнем заново?")
+    await state.set_state(PrimaryKnowsDoctor.symptom_description)
+    await cq.message.answer(TEXT_SYMPTOMS_ANAMNESIS)
+
 
 
 @router.callback_query(PrimaryKnowsDoctor.choosing_anamnesis, F.data == "draft_new")
@@ -245,31 +335,29 @@ async def anamnesis_yes(cq: CallbackQuery, state: FSMContext):
 
 @router.message(PrimaryKnowsDoctor.symptom_description, F.text)
 async def primary_symptom_for_anamnesis(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    doctors = get_doctors_by_ids([data["doctor_id"]]) if data.get("doctor_id") else []
-    specialty = doctors[0].get("specialty") if doctors else None
-    questions = get_anamnesis_questions(specialty)
-    await state.update_data(symptom_description=msg.text, questions=questions, answers=[], current_index=0)
-    await state.set_state(PrimaryKnowsDoctor.anamnesis_questions)
-    await msg.answer(f"Вопрос 1 из {len(questions)}:\n\n{questions[0]}")
-
-
-@router.message(PrimaryKnowsDoctor.anamnesis_questions, F.text)
-async def anamnesis_answer(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    questions = data["questions"]
-    answers = data.get("answers", [])
-    current_index = data.get("current_index", 0)
-    answers.append(msg.text.strip())
-    next_index = current_index + 1
-    user_id, doctor_id = data["user_id"], data.get("doctor_id")
-    save_draft(user_id, next_index, json.dumps(answers, ensure_ascii=False), doctor_id, data.get("symptom_description"))
-    await state.update_data(answers=answers, current_index=next_index)
-
-    if next_index >= len(questions):
-        await _go_to_anamnesis_confirm(msg, state, questions, answers, PrimaryKnowsDoctor)
+    turn = await _get_llm_turn(msg, state)
+    if not turn:
         return
-    await msg.answer(f"Вопрос {next_index + 1} из {len(questions)}:\n\n{questions[next_index]}")
+
+    if turn.decision_reached:
+        await _handle_llm_decision(msg, state, turn, PrimaryKnowsDoctor)
+    else:
+        await msg.answer(turn.question or "Пожалуйста, расскажите подробнее.")
+        await state.set_state(PrimaryKnowsDoctor.llm_anamnesis)
+
+
+@router.message(PrimaryKnowsDoctor.llm_anamnesis, F.text)
+async def pn_llm_anamnesis_step_knows(msg: Message, state: FSMContext):
+    # Используем тот же хендлер, что и для NoDoctor, но с другим стейтом
+    turn = await _get_llm_turn(msg, state)
+    if not turn:
+        return
+
+    if turn.decision_reached:
+        await _handle_llm_decision(msg, state, turn, PrimaryKnowsDoctor)
+    else:
+        await msg.answer(turn.question or "Пожалуйста, расскажите подробнее.")
+
 
 
 @router.callback_query(PrimaryKnowsDoctor.anamnesis_confirm, F.data == "anamnesis_ok")
@@ -359,13 +447,28 @@ async def primary_confirm_booking(cq: CallbackQuery, state: FSMContext):
 
 @router.message(PrimaryNoDoctor.symptom_description, F.text)
 async def primary_no_doctor_symptoms(msg: Message, state: FSMContext):
-    doctors = pick_doctors_by_symptoms(msg.text.strip(), limit=3)
-    if not doctors:
-        await msg.answer("Не удалось подобрать врача. Попробуйте описать симптомы иначе или выберите «Первичный» и укажите врача вручную.")
+    turn = await _get_llm_turn(msg, state)
+    if not turn:
         return
-    await state.update_data(symptom_description=msg.text.strip())
-    await state.set_state(PrimaryNoDoctor.choosing_doctor)
-    await msg.answer(TEXT_CHOOSE_DOCTOR, reply_markup=doctors_kb(doctors, "pn_doc"))
+
+    if turn.decision_reached:
+        await _handle_llm_decision(msg, state, turn, PrimaryNoDoctor)
+    else:
+        await msg.answer(turn.question or "Пожалуйста, расскажите подробнее.")
+        await state.set_state(PrimaryNoDoctor.llm_anamnesis)
+
+
+@router.message(PrimaryNoDoctor.llm_anamnesis, F.text)
+async def pn_llm_anamnesis_step(msg: Message, state: FSMContext):
+    turn = await _get_llm_turn(msg, state)
+    if not turn:
+        return
+
+    if turn.decision_reached:
+        await _handle_llm_decision(msg, state, turn, PrimaryNoDoctor)
+    else:
+        await msg.answer(turn.question or "Пожалуйста, расскажите подробнее.")
+
 
 
 @router.callback_query(PrimaryNoDoctor.choosing_doctor, F.data.startswith("pn_doc:"))
@@ -373,9 +476,17 @@ async def primary_no_doctor_chosen(cq: CallbackQuery, state: FSMContext):
     await cq.answer()
     doctor_id = int(cq.data.split(":")[1])
     await state.update_data(doctor_id=doctor_id)
-    await state.set_state(PrimaryNoDoctor.choosing_anamnesis)
+
     data = await state.get_data()
-    draft = get_draft(data["user_id"], doctor_id)
+    # Если мы уже прошли через LLM (есть история), то анамнез уже собран
+    if data.get("history"):
+        # Переходим к выбору слотов, с собранным анамнезом (10 мин)
+        await _show_slots_primary_no(cq.message, state, DURATION_MIN_WITH_ANAMNESIS, with_description=True)
+        return
+
+    await state.set_state(PrimaryNoDoctor.choosing_anamnesis)
+    user_id = data["user_id"]
+    draft = get_draft(user_id, doctor_id)
     if draft:
         await cq.message.edit_text(
             "Есть незавершённый анамнез. Продолжить?",
@@ -383,6 +494,7 @@ async def primary_no_doctor_chosen(cq: CallbackQuery, state: FSMContext):
         )
         return
     await cq.message.edit_text(TEXT_ANAMNESIS_OFFER, reply_markup=yes_no_kb("pn_anamnesis_yes", "pn_anamnesis_no"))
+
 
 
 @router.callback_query(PrimaryNoDoctor.choosing_anamnesis, F.data == "pn_draft_continue")
@@ -393,10 +505,12 @@ async def pn_draft_continue(cq: CallbackQuery, state: FSMContext):
     if not draft:
         await cq.message.edit_text(TEXT_ANAMNESIS_OFFER, reply_markup=yes_no_kb("pn_anamnesis_yes", "pn_anamnesis_no"))
         return
-    answers = json.loads(draft["answers_json"])
-    questions = get_anamnesis_questions(None)
-    await state.update_data(questions=questions, answers=answers, current_index=draft["current_question_index"])
-    await _go_to_anamnesis_confirm(cq.message, state, questions, answers, PrimaryNoDoctor)
+    # При продолжении старого анамнеза просто показываем то, что было, или сбрасываем.
+    # Для простоты: сбрасываем и предлагаем заново через LLM.
+    await cq.message.edit_text("Старый черновик несовместим с новой системой. Начнем заново?")
+    await state.set_state(PrimaryNoDoctor.symptom_description_after_doctor)
+    await cq.message.answer(TEXT_SYMPTOMS_ANAMNESIS)
+
 
 
 @router.callback_query(PrimaryNoDoctor.choosing_anamnesis, F.data == "pn_draft_new")
@@ -420,28 +534,16 @@ async def pn_anamnesis_yes(cq: CallbackQuery, state: FSMContext):
 
 @router.message(PrimaryNoDoctor.symptom_description_after_doctor, F.text)
 async def pn_symptom_anamnesis(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    doctors = get_doctors_by_ids([data["doctor_id"]]) if data.get("doctor_id") else []
-    specialty = doctors[0].get("specialty") if doctors else None
-    questions = get_anamnesis_questions(specialty)
-    await state.update_data(symptom_description=msg.text, questions=questions, answers=[], current_index=0)
-    await state.set_state(PrimaryNoDoctor.anamnesis_questions)
-    await msg.answer(f"Вопрос 1 из {len(questions)}:\n\n{questions[0]}")
-
-
-@router.message(PrimaryNoDoctor.anamnesis_questions, F.text)
-async def pn_anamnesis_answer(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    questions, answers = data["questions"], data.get("answers", [])
-    current_index = data.get("current_index", 0)
-    answers.append(msg.text.strip())
-    next_index = current_index + 1
-    save_draft(data["user_id"], next_index, json.dumps(answers, ensure_ascii=False), data["doctor_id"], data.get("symptom_description"))
-    await state.update_data(answers=answers, current_index=next_index)
-    if next_index >= len(questions):
-        await _go_to_anamnesis_confirm(msg, state, questions, answers, PrimaryNoDoctor)
+    turn = await _get_llm_turn(msg, state)
+    if not turn:
         return
-    await msg.answer(f"Вопрос {next_index + 1} из {len(questions)}:\n\n{questions[next_index]}")
+
+    if turn.decision_reached:
+        await _handle_llm_decision(msg, state, turn, PrimaryNoDoctor)
+    else:
+        await msg.answer(turn.question or "Пожалуйста, расскажите подробнее.")
+        await state.set_state(PrimaryNoDoctor.llm_anamnesis)
+
 
 
 @router.callback_query(PrimaryNoDoctor.anamnesis_confirm, F.data == "anamnesis_ok")

@@ -5,7 +5,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Set up persistence directory
-FAISS_INDEX_DIR = "./faiss_db"
+FAISS_INDEX_DIR = "data/faiss_db"
 
 def main():
     print("Initializing embedding model (free local multilingual model)...")

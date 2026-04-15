@@ -6,6 +6,7 @@ from db.crud import (
     get_doctors_by_ids,
     get_doctors_for_secondary,
     get_therapist,
+    get_doctors_by_specialty,
     get_available_slots,
     book_slot,
     create_appointment,
